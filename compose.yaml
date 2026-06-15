@@ -1,0 +1,22 @@
+services:
+  zoho-data:
+    build:
+      context: .
+    container_name: zoho-data
+    restart: unless-stopped
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8765
+      ZOHO_DB_PATH: /external-data/zoho.sqlite3
+      ZOHO_BACKUP_DIR: /external-attachments
+    ports:
+      - "${ZOHO_APP_PORT:-8765}:8765"
+    volumes:
+      - type: bind
+        source: ${ZOHO_DB_PATH_HOST}
+        target: /external-data/zoho.sqlite3
+        read_only: true
+      - type: bind
+        source: ${ZOHO_BACKUP_DIR_HOST}
+        target: /external-attachments
+        read_only: true

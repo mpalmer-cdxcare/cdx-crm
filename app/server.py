@@ -19,8 +19,6 @@ from openpyxl.utils import get_column_letter
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_DIR = ROOT / "app"
-DB_PATH = ROOT / "data" / "zoho.sqlite3"
-BACKUP_DIR = ROOT / "zoho backup"
 CHUNK_SIZE = 1024 * 1024
 SHEET_NAME_CLEANER = re.compile(r'[\\/*?:\[\]]')
 DATE_NUMBER_FORMAT = "yyyy-mm-dd hh:mm"
@@ -41,6 +39,20 @@ SERVICE_FEE_FIELDS = [
     ("Travel Fee, if applicable", "Travel Fee, if applicable", "currency"),
     ("Billing Terms", "Billing Terms", "text"),
 ]
+
+
+def configured_path(env_name, default):
+    raw = os.environ.get(env_name, "").strip()
+    if not raw:
+        return default
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = (ROOT / candidate).resolve()
+    return candidate
+
+
+DB_PATH = configured_path("ZOHO_DB_PATH", ROOT / "data" / "zoho.sqlite3")
+BACKUP_DIR = configured_path("ZOHO_BACKUP_DIR", ROOT / "zoho backup")
 
 
 def q(identifier):
@@ -1665,9 +1677,12 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    host = os.environ.get("HOST", "0.0.0.0")
     port = int(sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PORT", "8765"))
-    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    print(f"Zoho Data UI running on port {port}")
+    server = ThreadingHTTPServer((host, port), Handler)
+    print(f"CDX CRM UI running on {host}:{port}")
+    print(f"Database path: {DB_PATH}")
+    print(f"Attachment archive path: {BACKUP_DIR}")
     print("Press Ctrl+C to stop.")
     server.serve_forever()
 

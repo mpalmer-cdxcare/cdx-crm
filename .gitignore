@@ -1,4 +1,5 @@
 .DS_Store
+.env
 
 # Local Python environment and caches
 .venv/
@@ -16,4 +17,3 @@ data/
 zoho backup/
 zoho export/
 Attachments_*.zip
-

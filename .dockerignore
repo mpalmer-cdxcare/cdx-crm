@@ -1,0 +1,14 @@
+.git
+.gitignore
+.venv
+.pycache
+__pycache__
+.DS_Store
+
+data
+zoho backup
+zoho export
+
+*.sqlite3
+*.db
+*.xlsx

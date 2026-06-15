@@ -123,14 +123,10 @@ button:hover {
 }
 
 .mark {
-  display: grid;
-  place-items: center;
   width: 42px;
   height: 42px;
-  border-radius: 8px;
-  background: var(--accent);
-  color: var(--accent-ink);
-  font-weight: 800;
+  object-fit: contain;
+  flex: 0 0 auto;
 }
 
 h1,
