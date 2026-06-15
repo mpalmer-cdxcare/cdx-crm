@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Zoho Data</title>
+        <script>
+            (() => {
+                const saved = localStorage.getItem("zoho-theme");
+                const systemDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+                const theme = saved || (systemDark ? "dark" : "light");
+                document.documentElement.dataset.theme = theme;
+            })();
+        </script>
+        <link rel="stylesheet" href="/styles.css" />
+    </head>
+    <body>
+        <main class="shell">
+            <aside class="sidebar">
+                <div class="brand">
+                    <div class="mark">Z</div>
+                    <div>
+                        <h1>Zoho Data</h1>
+                        <p>Local CRM explorer</p>
+                    </div>
+                </div>
+
+                <section class="metrics" id="metrics"></section>
+
+                <section class="filters">
+                    <section class="filter-group">
+                        <div class="filter-label">Account type</div>
+                        <details class="filter-dropdown" data-filter="account_type">
+                            <summary id="accountTypeSummary">All types</summary>
+                            <div id="accountTypeOptions" class="filter-options"></div>
+                        </details>
+                    </section>
+                    <section class="filter-group">
+                        <div class="filter-label">State</div>
+                        <details class="filter-dropdown" data-filter="state">
+                            <summary id="stateSummary">All states</summary>
+                            <div id="stateOptions" class="filter-options"></div>
+                        </details>
+                    </section>
+                    <section class="filter-group">
+                        <div class="filter-label">MSA</div>
+                        <details class="filter-dropdown" data-filter="msa">
+                            <summary id="msaSummary">All MSAs</summary>
+                            <div id="msaOptions" class="filter-options"></div>
+                        </details>
+                    </section>
+                    <section class="filter-group">
+                        <div class="filter-label">Contract status</div>
+                        <details class="filter-dropdown" data-filter="contract_status">
+                            <summary id="contractStatusSummary">All statuses</summary>
+                            <div id="contractStatusOptions" class="filter-options"></div>
+                        </details>
+                        <small class="filter-help">Select one or more checkboxes in each filter.</small>
+                    </section>
+                </section>
+
+                <section class="saved-views">
+                    <div class="saved-views-head">
+                        <div class="filter-label">Saved views</div>
+                    </div>
+                    <div class="saved-view-create">
+                        <input id="savedViewName" type="text" placeholder="Name this filter set" />
+                        <button id="saveView" type="button">Save current</button>
+                    </div>
+                    <div id="savedViewsList" class="saved-views-list">
+                        <p class="filter-help">Save a search and filter combination to reuse it later.</p>
+                    </div>
+                </section>
+            </aside>
+
+            <section class="workspace">
+                <header class="toolbar">
+                    <div class="searchbox">
+                        <span aria-hidden="true">⌕</span>
+                        <input
+                            id="search"
+                            type="search"
+                            placeholder="Search accounts, city, MSA, territory, owner, contract status"
+                        />
+                    </div>
+                    <a id="exportExcel" class="button-link" href="/export/accounts.xlsx">
+                        Export Excel
+                    </a>
+                    <a id="exportContacts" class="button-link" href="/export/contacts.xlsx">
+                        Export Contacts
+                    </a>
+                    <button id="themeToggle" type="button" aria-pressed="true">
+                        Dark mode
+                    </button>
+                    <button id="clearFilters" type="button">Clear</button>
+                </header>
+
+                <section class="content">
+                    <div class="results">
+                        <div class="results-head">
+                            <strong id="resultCount">Accounts</strong>
+                            <div class="results-head-controls">
+                                <span id="resultMeta"></span>
+                                <label class="sort-control">
+                                    <span>Sort</span>
+                                    <select id="sortAccounts">
+                                        <option value="account_name">Name</option>
+                                        <option value="updated_desc">Recently updated</option>
+                                        <option value="owner">Owner</option>
+                                        <option value="contract_status">Contract status</option>
+                                        <option value="msa">MSA</option>
+                                    </select>
+                                </label>
+                            </div>
+                        </div>
+                        <div id="currentView" class="current-view"></div>
+                        <div id="accountList" class="account-list"></div>
+                        <button id="loadMore" class="load-more" type="button">
+                            Load more
+                        </button>
+                    </div>
+
+                    <article class="detail" id="detail">
+                        <div class="empty-state">
+                            <h2>Select an account</h2>
+                            <p>
+                                Search or filter on the left, then open a record
+                                to see contacts, deals, cases, and notes.
+                            </p>
+                        </div>
+                    </article>
+                </section>
+            </section>
+        </main>
+
+        <script src="/app.js"></script>
+    </body>
+</html>

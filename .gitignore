@@ -1,0 +1,19 @@
+.DS_Store
+
+# Local Python environment and caches
+.venv/
+.pycache/
+__pycache__/
+*.pyc
+
+# Local app data and generated database artifacts
+data/
+*.sqlite3
+*.db
+*.xlsx
+
+# CRM source/export and attachment archives
+zoho backup/
+zoho export/
+Attachments_*.zip
+
