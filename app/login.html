@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>CDX CRM Login</title>
+        <script>
+            (() => {
+                const systemDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+                document.documentElement.dataset.theme = systemDark ? "dark" : "light";
+            })();
+        </script>
+        <link rel="icon" type="image/png" href="/logo.png" />
+        <link rel="stylesheet" href="/styles.css" />
+    </head>
+    <body class="auth-page">
+        <main class="auth-shell">
+            <section class="auth-card">
+                <img class="auth-logo" src="/logo.png" alt="CDX CRM logo" />
+                <h1>CDX CRM</h1>
+                __LOGIN_ERROR__
+                <form class="auth-form" method="post" action="/login">
+                    <label>
+                        <span>Username</span>
+                        <input
+                            name="username"
+                            type="text"
+                            autocomplete="username"
+                            autocapitalize="none"
+                            required
+                        />
+                    </label>
+                    <label>
+                        <span>Password</span>
+                        <input
+                            name="password"
+                            type="password"
+                            autocomplete="current-password"
+                            required
+                        />
+                    </label>
+                    <button type="submit">Log in</button>
+                </form>
+            </section>
+        </main>
+    </body>
+</html>

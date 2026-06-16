@@ -1,16 +1,20 @@
+const BOOTSTRAP = window.__BOOTSTRAP__ || {};
+const INITIAL_PREFERENCES = BOOTSTRAP.preferences || {};
+
 const state = {
   q: "",
   accountTypes: [],
   states: [],
   msas: [],
   contractStatuses: [],
-  sortBy: "account_name",
+  sortBy: INITIAL_PREFERENCES.sortBy || "account_name",
   theme: document.documentElement.dataset.theme || "dark",
+  themePreference: INITIAL_PREFERENCES.theme || "system",
   offset: 0,
   limit: 50,
   total: 0,
   selectedId: "",
-  activeTab: "timeline",
+  activeTab: INITIAL_PREFERENCES.defaultDetailTab || "timeline",
   focusedRecord: null,
   accounts: [],
   detail: null,
@@ -23,7 +27,8 @@ const state = {
   attachmentModule: "all",
   attachmentAvailability: "all",
   attachmentQuery: "",
-  savedViews: [],
+  savedViews: Array.isArray(INITIAL_PREFERENCES.savedViews) ? INITIAL_PREFERENCES.savedViews : [],
+  currentUser: BOOTSTRAP.user || null,
 };
 
 const els = {
@@ -43,6 +48,14 @@ const els = {
   currentView: document.querySelector("#currentView"),
   loadMore: document.querySelector("#loadMore"),
   detail: document.querySelector("#detail"),
+  sessionUserName: document.querySelector("#sessionUserName"),
+  logoutButton: document.querySelector("#logoutButton"),
+  adminPanel: document.querySelector("#adminPanel"),
+  adminResetForm: document.querySelector("#adminResetForm"),
+  adminResetUser: document.querySelector("#adminResetUser"),
+  adminResetPassword: document.querySelector("#adminResetPassword"),
+  adminMessage: document.querySelector("#adminMessage"),
+  adminUserList: document.querySelector("#adminUserList"),
 };
 
 const filterConfig = {
@@ -76,8 +89,6 @@ const filterConfig = {
   },
 };
 
-const THEME_STORAGE_KEY = "zoho-theme";
-const SAVED_VIEWS_STORAGE_KEY = "zoho-saved-views";
 const SORT_LABELS = {
   account_name: "Name",
   updated_desc: "Recently updated",
@@ -85,6 +96,14 @@ const SORT_LABELS = {
   contract_status: "Contract status",
   msa: "MSA",
 };
+let preferenceSaveTimer = 0;
+
+function setMessage(element, message = "", tone = "info") {
+  if (!element) return;
+  element.hidden = !message;
+  element.textContent = message;
+  element.dataset.tone = tone;
+}
 
 function fmtNumber(value) {
   return Number(value || 0).toLocaleString();
@@ -135,14 +154,59 @@ function debounce(fn, wait = 250) {
   };
 }
 
-function setTheme(theme, { persist = true } = {}) {
-  state.theme = theme;
-  document.documentElement.dataset.theme = theme;
-  els.themeToggle.textContent = theme === "dark" ? "Light mode" : "Dark mode";
-  els.themeToggle.setAttribute("aria-pressed", String(theme === "dark"));
-  els.themeToggle.setAttribute("aria-label", theme === "dark" ? "Switch to light mode" : "Switch to dark mode");
+function resolveTheme(preference = state.themePreference) {
+  if (preference === "dark" || preference === "light") return preference;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function userPreferencesSnapshot() {
+  return {
+    theme: state.themePreference,
+    savedViews: state.savedViews,
+    sortBy: state.sortBy,
+    defaultDetailTab: state.activeTab,
+  };
+}
+
+async function persistPreferencesNow() {
+  const response = await fetch("/api/preferences", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(userPreferencesSnapshot()),
+  });
+  if (response.status === 401) {
+    window.location.href = "/login";
+    return;
+  }
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.error || "Unable to save preferences");
+  }
+}
+
+function schedulePreferenceSave() {
+  window.clearTimeout(preferenceSaveTimer);
+  preferenceSaveTimer = window.setTimeout(() => {
+    persistPreferencesNow().catch((error) => {
+      console.warn(error.message);
+    });
+  }, 250);
+}
+
+function setThemePreference(preference, { persist = true } = {}) {
+  state.themePreference = preference;
+  state.theme = resolveTheme(preference);
+  document.documentElement.dataset.theme = state.theme;
+  els.themeToggle.textContent = state.theme === "dark" ? "Light mode" : "Dark mode";
+  els.themeToggle.setAttribute("aria-pressed", String(state.theme === "dark"));
+  els.themeToggle.setAttribute(
+    "aria-label",
+    state.theme === "dark" ? "Switch to light mode" : "Switch to dark mode",
+  );
   if (persist) {
-    localStorage.setItem(THEME_STORAGE_KEY, theme);
+    schedulePreferenceSave();
   }
 }
 
@@ -159,19 +223,6 @@ function currentViewSnapshot() {
 
 function snapshotsMatch(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
-}
-
-function persistSavedViews() {
-  localStorage.setItem(SAVED_VIEWS_STORAGE_KEY, JSON.stringify(state.savedViews));
-}
-
-function loadSavedViews() {
-  try {
-    const raw = localStorage.getItem(SAVED_VIEWS_STORAGE_KEY);
-    state.savedViews = raw ? JSON.parse(raw) : [];
-  } catch {
-    state.savedViews = [];
-  }
 }
 
 function renderSavedViews() {
@@ -235,7 +286,7 @@ function applySavedView(id) {
 
 function deleteSavedView(id) {
   state.savedViews = state.savedViews.filter((view) => view.id !== id);
-  persistSavedViews();
+  schedulePreferenceSave();
   renderSavedViews();
 }
 
@@ -256,17 +307,24 @@ function saveCurrentView() {
   } else {
     state.savedViews = [nextView, ...state.savedViews];
   }
-  persistSavedViews();
+  schedulePreferenceSave();
   els.savedViewName.value = "";
   renderSavedViews();
 }
 
 function initTheme() {
-  setTheme(state.theme, { persist: false });
+  setThemePreference(state.themePreference, { persist: false });
   const media = window.matchMedia("(prefers-color-scheme: dark)");
   const applySystemTheme = (event) => {
-    if (localStorage.getItem(THEME_STORAGE_KEY)) return;
-    setTheme(event.matches ? "dark" : "light", { persist: false });
+    if (state.themePreference !== "system") return;
+    state.theme = event.matches ? "dark" : "light";
+    document.documentElement.dataset.theme = state.theme;
+    els.themeToggle.textContent = state.theme === "dark" ? "Light mode" : "Dark mode";
+    els.themeToggle.setAttribute("aria-pressed", String(state.theme === "dark"));
+    els.themeToggle.setAttribute(
+      "aria-label",
+      state.theme === "dark" ? "Switch to light mode" : "Switch to dark mode",
+    );
   };
   if (typeof media.addEventListener === "function") {
     media.addEventListener("change", applySystemTheme);
@@ -277,11 +335,98 @@ function initTheme() {
 
 async function api(path) {
   const response = await fetch(path);
+  if (response.status === 401) {
+    window.location.href = "/login";
+    throw new Error("Authentication required");
+  }
+  if (response.status === 423) {
+    window.location.href = "/change-password";
+    throw new Error("Password change required");
+  }
   const payload = await response.json();
   if (!response.ok) {
     throw new Error(payload.error || "Request failed");
   }
   return payload;
+}
+
+async function logout() {
+  try {
+    await fetch("/api/logout", { method: "POST" });
+  } finally {
+    window.location.href = "/login";
+  }
+}
+
+async function postJson(path, payload) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  if (response.status === 401) {
+    window.location.href = "/login";
+    throw new Error("Authentication required");
+  }
+  if (response.status === 423) {
+    window.location.href = "/change-password";
+    throw new Error("Password change required");
+  }
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error || "Request failed");
+  }
+  return body;
+}
+
+function renderAdminUserList(users) {
+  if (!els.adminUserList) return;
+  if (!users.length) {
+    els.adminUserList.innerHTML = `<p class="filter-help">No local users found.</p>`;
+    return;
+  }
+  els.adminUserList.innerHTML = users.map((user) => `
+    <article class="admin-user-row">
+      <div>
+        <strong>${escapeHtml(user.display_name)}</strong>
+        <span>${escapeHtml(user.username)}</span>
+      </div>
+      <div class="admin-user-flags">
+        ${user.is_admin ? '<span class="chip">Admin</span>' : ""}
+        ${user.must_change_password ? '<span class="chip warn">Must reset</span>' : ""}
+        ${!user.is_active ? '<span class="chip">Inactive</span>' : ""}
+      </div>
+    </article>
+  `).join("");
+}
+
+async function loadAdminUsers() {
+  if (!state.currentUser?.isAdmin) return;
+  const payload = await api("/api/admin/users");
+  const users = payload.users || [];
+  const options = users
+    .map((user) => `<option value="${escapeHtml(user.username)}">${escapeHtml(user.display_name)} (${escapeHtml(user.username)})</option>`)
+    .join("");
+  els.adminResetUser.innerHTML = options;
+  renderAdminUserList(users);
+}
+
+async function submitAdminReset(event) {
+  event.preventDefault();
+  setMessage(els.adminMessage, "");
+  try {
+    const payload = await postJson("/api/admin/reset-password", {
+      username: els.adminResetUser.value,
+      newPassword: els.adminResetPassword.value,
+    });
+    els.adminResetPassword.value = "";
+    setMessage(els.adminMessage, payload.message || "Password reset.", "success");
+    await loadAdminUsers();
+  } catch (error) {
+    setMessage(els.adminMessage, error.message, "error");
+  }
 }
 
 function accountParams() {
@@ -1421,6 +1566,7 @@ function renderDetail() {
     button.addEventListener("click", () => {
       state.activeTab = button.dataset.tab;
       state.focusedRecord = null;
+      schedulePreferenceSave();
       renderDetail();
     });
   });
@@ -1507,6 +1653,7 @@ els.clearFilters.addEventListener("click", () => {
 
 els.sortAccounts.addEventListener("change", () => {
   state.sortBy = els.sortAccounts.value;
+  schedulePreferenceSave();
   resetAndLoad();
 });
 
@@ -1522,8 +1669,16 @@ els.savedViewName.addEventListener("keydown", (event) => {
 });
 
 els.themeToggle.addEventListener("click", () => {
-  setTheme(state.theme === "dark" ? "light" : "dark");
+  setThemePreference(state.theme === "dark" ? "light" : "dark");
 });
+
+els.logoutButton.addEventListener("click", () => {
+  logout();
+});
+
+if (els.adminResetForm) {
+  els.adminResetForm.addEventListener("submit", submitAdminReset);
+}
 
 els.loadMore.addEventListener("click", () => {
   state.offset += state.limit;
@@ -1533,9 +1688,18 @@ els.loadMore.addEventListener("click", () => {
 async function init() {
   try {
     initTheme();
-    loadSavedViews();
+    if (els.sessionUserName) {
+      els.sessionUserName.textContent = state.currentUser?.displayName || state.currentUser?.username || "";
+    }
+    if (els.adminPanel) {
+      els.adminPanel.hidden = !state.currentUser?.isAdmin;
+      els.adminPanel.open = false;
+    }
     renderSavedViews();
     els.sortAccounts.value = state.sortBy;
+    if (state.currentUser?.isAdmin) {
+      await loadAdminUsers();
+    }
     await loadMetadata();
     await loadFilters();
     updateExportLink();

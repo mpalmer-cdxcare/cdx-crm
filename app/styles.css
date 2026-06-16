@@ -63,6 +63,12 @@ body {
   letter-spacing: 0;
 }
 
+body.auth-page {
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
 button,
 input,
 select {
@@ -239,6 +245,116 @@ h1 {
   color: var(--muted);
 }
 
+.account-tools {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.account-tool-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.account-tool-card[hidden] {
+  display: none;
+}
+
+.account-tool-card summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.account-tool-card summary::marker {
+  color: var(--muted);
+}
+
+.account-tool-card[open] {
+  gap: 12px;
+}
+
+.stack-form {
+  display: grid;
+  gap: 10px;
+}
+
+.stack-form label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.stack-form input,
+.stack-form select {
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-strong);
+  color: var(--ink);
+}
+
+.inline-message {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel-strong);
+  font-size: 13px;
+}
+
+.inline-message[data-tone="success"] {
+  border-color: rgba(88, 193, 172, 0.35);
+  background: rgba(88, 193, 172, 0.12);
+}
+
+.inline-message[data-tone="error"] {
+  border-color: rgba(201, 111, 111, 0.45);
+  background: rgba(135, 34, 34, 0.18);
+  color: #ffd2d2;
+}
+
+.admin-user-list {
+  display: grid;
+  gap: 8px;
+}
+
+.admin-user-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--rule-soft);
+}
+
+.admin-user-row:first-child {
+  border-top: 0;
+}
+
+.admin-user-row div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.admin-user-row span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.admin-user-flags {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .filter-group {
   display: grid;
   gap: 6px;
@@ -351,14 +467,46 @@ input {
   display: flex;
   gap: 12px;
   align-items: center;
+  flex-wrap: wrap;
   padding: 18px 20px;
   border-bottom: 1px solid var(--line);
   background: var(--toolbar);
   backdrop-filter: blur(10px);
 }
 
+.toolbar-spacer {
+  flex: 1 1 auto;
+}
+
 #themeToggle {
   min-width: 108px;
+}
+
+.session-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+}
+
+.session-user {
+  display: grid;
+  gap: 2px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.session-user span {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.session-user strong {
+  font-size: 13px;
 }
 
 .searchbox {
@@ -457,6 +605,68 @@ input {
   background: var(--soft);
   color: var(--chip-ink);
   border-color: transparent;
+}
+
+.auth-shell {
+  width: min(100%, 420px);
+}
+
+.auth-card {
+  display: grid;
+  justify-items: stretch;
+  gap: 18px;
+  padding: 34px 32px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.auth-card h1 {
+  justify-self: center;
+  font-size: 32px;
+  line-height: 1.05;
+  font-weight: 800;
+}
+
+.auth-logo {
+  justify-self: center;
+  width: 72px;
+  height: 72px;
+  object-fit: contain;
+}
+
+.auth-copy,
+.auth-note {
+  color: var(--muted);
+}
+
+.auth-form {
+  display: grid;
+  gap: 14px;
+}
+
+.auth-form label {
+  display: grid;
+  gap: 6px;
+  font-size: 14px;
+}
+
+.auth-form input {
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-strong);
+  color: var(--ink);
+}
+
+.auth-error {
+  padding: 12px 14px;
+  border: 1px solid rgba(201, 111, 111, 0.45);
+  border-radius: 10px;
+  background: rgba(135, 34, 34, 0.18);
+  color: #ffd2d2;
 }
 
 .current-view-badge strong {
@@ -572,6 +782,11 @@ input {
   color: var(--chip-ink);
   padding: 3px 8px;
   font-size: 12px;
+}
+
+.chip.warn {
+  background: var(--warn-bg);
+  color: var(--warn);
 }
 
 .load-more {

@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
+import base64
+import hashlib
+import html
 import json
 import mimetypes
 import os
 import re
+import secrets
 import sqlite3
 import sys
 import zipfile
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
+from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
@@ -23,6 +28,19 @@ CHUNK_SIZE = 1024 * 1024
 SHEET_NAME_CLEANER = re.compile(r'[\\/*?:\[\]]')
 DATE_NUMBER_FORMAT = "yyyy-mm-dd hh:mm"
 FORMER_WORD = re.compile(r"\bformer\b", re.IGNORECASE)
+VALID_SORT_KEYS = {"account_name", "updated_desc", "owner", "contract_status", "msa"}
+VALID_DETAIL_TABS = {
+    "timeline",
+    "contacts",
+    "deals",
+    "cases",
+    "notes",
+    "attachments",
+    "raw",
+}
+SESSION_COOKIE_NAME = os.environ.get("APP_SESSION_COOKIE_NAME", "cdxcrm_session")
+SESSION_TTL_DAYS = max(1, int(os.environ.get("APP_SESSION_TTL_DAYS", "14")))
+PBKDF2_ITERATIONS = 310_000
 
 SERVICE_FEE_FIELDS = [
     ("MBS - Med A", "MBS - Med A", "currency"),
@@ -53,6 +71,675 @@ def configured_path(env_name, default):
 
 DB_PATH = configured_path("ZOHO_DB_PATH", ROOT / "data" / "zoho.sqlite3")
 BACKUP_DIR = configured_path("ZOHO_BACKUP_DIR", ROOT / "zoho backup")
+APP_STATE_DB_PATH = configured_path(
+    "APP_STATE_DB_PATH", ROOT / "data" / "app_state.sqlite3"
+)
+
+
+def now_utc():
+    return datetime.utcnow()
+
+
+def utc_timestamp(dt=None):
+    return (dt or now_utc()).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_utc_timestamp(value):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
+
+
+def default_preferences():
+    return {
+        "theme": "system",
+        "savedViews": [],
+        "sortBy": "account_name",
+        "defaultDetailTab": "timeline",
+    }
+
+
+def normalize_saved_view(view):
+    if not isinstance(view, dict):
+        return None
+
+    name = clean_text(view.get("name"))[:80]
+    if not name:
+        return None
+    view_id = clean_text(view.get("id"))[:120] or f"view_{secrets.token_hex(8)}"
+    filters = view.get("filters") if isinstance(view.get("filters"), dict) else {}
+
+    def string_list(key):
+        values = filters.get(key)
+        if not isinstance(values, list):
+            return []
+        cleaned = sorted(
+            {
+                clean_text(item)[:120]
+                for item in values
+                if clean_text(item)
+            },
+            key=str.casefold,
+        )
+        return cleaned[:100]
+
+    sort_by = clean_text(filters.get("sortBy")) or "account_name"
+    if sort_by not in VALID_SORT_KEYS:
+        sort_by = "account_name"
+
+    return {
+        "id": view_id,
+        "name": name,
+        "filters": {
+            "q": clean_text(filters.get("q"))[:200],
+            "accountTypes": string_list("accountTypes"),
+            "states": string_list("states"),
+            "msas": string_list("msas"),
+            "contractStatuses": string_list("contractStatuses"),
+            "sortBy": sort_by,
+        },
+    }
+
+
+def sanitize_preferences(payload):
+    defaults = default_preferences()
+    if not isinstance(payload, dict):
+        return defaults
+
+    preferences = {}
+    theme = clean_text(payload.get("theme")) or defaults["theme"]
+    preferences["theme"] = theme if theme in {"system", "light", "dark"} else defaults["theme"]
+
+    sort_by = clean_text(payload.get("sortBy")) or defaults["sortBy"]
+    preferences["sortBy"] = sort_by if sort_by in VALID_SORT_KEYS else defaults["sortBy"]
+
+    default_tab = clean_text(payload.get("defaultDetailTab")) or defaults["defaultDetailTab"]
+    preferences["defaultDetailTab"] = (
+        default_tab if default_tab in VALID_DETAIL_TABS else defaults["defaultDetailTab"]
+    )
+
+    raw_views = payload.get("savedViews")
+    normalized_views = []
+    if isinstance(raw_views, list):
+        for item in raw_views[:50]:
+            view = normalize_saved_view(item)
+            if view:
+                normalized_views.append(view)
+    preferences["savedViews"] = normalized_views
+    return preferences
+
+
+def connect_app_state():
+    APP_STATE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(APP_STATE_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def ensure_app_state_db():
+    conn = connect_app_state()
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                display_name TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                is_admin INTEGER NOT NULL DEFAULT 0,
+                must_change_password INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS user_preferences (
+                user_id INTEGER PRIMARY KEY,
+                preferences_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash);
+            CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+            """
+        )
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(users)").fetchall()
+        }
+        if "is_admin" not in columns:
+            conn.execute(
+                "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"
+            )
+        if "must_change_password" not in columns:
+            conn.execute(
+                "ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0"
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def hash_password(password, *, salt=None, iterations=PBKDF2_ITERATIONS):
+    secret = password.encode("utf-8")
+    salt_bytes = salt or secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", secret, salt_bytes, iterations)
+    return "pbkdf2_sha256${}${}${}".format(
+        iterations,
+        base64.b64encode(salt_bytes).decode("ascii"),
+        base64.b64encode(digest).decode("ascii"),
+    )
+
+
+def verify_password(password, stored_hash):
+    try:
+        algorithm, iterations, salt_b64, digest_b64 = stored_hash.split("$", 3)
+    except ValueError:
+        return False
+    if algorithm != "pbkdf2_sha256":
+        return False
+    try:
+        salt = base64.b64decode(salt_b64.encode("ascii"))
+        expected = base64.b64decode(digest_b64.encode("ascii"))
+        candidate = hashlib.pbkdf2_hmac(
+            "sha256", password.encode("utf-8"), salt, int(iterations)
+        )
+    except (ValueError, TypeError):
+        return False
+    return secrets.compare_digest(candidate, expected)
+
+
+def hash_session_token(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def user_count():
+    conn = connect_app_state()
+    try:
+        row = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()
+        return row["count"] if row else 0
+    finally:
+        conn.close()
+
+
+def list_local_users():
+    conn = connect_app_state()
+    try:
+        rows = conn.execute(
+            """
+            SELECT username, display_name, is_active, is_admin, must_change_password, created_at, updated_at
+            FROM users
+            ORDER BY username COLLATE NOCASE
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def upsert_local_user(
+    username,
+    password,
+    *,
+    display_name=None,
+    is_active=True,
+    is_admin=None,
+    must_change_password=None,
+):
+    ensure_app_state_db()
+    username = clean_text(username)
+    if not username:
+        raise ValueError("Username is required")
+    if not password:
+        raise ValueError("Password is required")
+
+    display_name = clean_text(display_name) or username
+    now = utc_timestamp()
+    password_hash = hash_password(password)
+
+    conn = connect_app_state()
+    try:
+        existing = conn.execute(
+            "SELECT id, is_admin, must_change_password FROM users WHERE username = ? COLLATE NOCASE", (username,)
+        ).fetchone()
+        if existing:
+            next_is_admin = existing["is_admin"] if is_admin is None else (1 if is_admin else 0)
+            next_must_change = (
+                existing["must_change_password"]
+                if must_change_password is None
+                else (1 if must_change_password else 0)
+            )
+            conn.execute(
+                """
+                UPDATE users
+                SET display_name = ?, password_hash = ?, is_active = ?, is_admin = ?, must_change_password = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    display_name,
+                    password_hash,
+                    1 if is_active else 0,
+                    next_is_admin,
+                    next_must_change,
+                    now,
+                    existing["id"],
+                ),
+            )
+            user_id = existing["id"]
+        else:
+            cursor = conn.execute(
+                """
+                INSERT INTO users (username, display_name, password_hash, is_active, is_admin, must_change_password, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    username,
+                    display_name,
+                    password_hash,
+                    1 if is_active else 0,
+                    1 if is_admin else 0,
+                    1 if must_change_password else 0,
+                    now,
+                    now,
+                ),
+            )
+            user_id = cursor.lastrowid
+
+        existing_pref = conn.execute(
+            "SELECT 1 FROM user_preferences WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        if existing_pref is None:
+            conn.execute(
+                """
+                INSERT INTO user_preferences (user_id, preferences_json, updated_at)
+                VALUES (?, ?, ?)
+                """,
+                (user_id, json.dumps(default_preferences()), now),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def revoke_user_sessions(user_id):
+    conn = connect_app_state()
+    try:
+        conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_local_user_password(username, password, *, must_change_password=False):
+    if not password:
+        raise ValueError("Password is required")
+    ensure_app_state_db()
+    conn = connect_app_state()
+    try:
+        row = conn.execute(
+            "SELECT id FROM users WHERE username = ? COLLATE NOCASE", (username,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"User not found: {username}")
+        conn.execute(
+            "UPDATE users SET password_hash = ?, must_change_password = ?, updated_at = ? WHERE id = ?",
+            (
+                hash_password(password),
+                1 if must_change_password else 0,
+                utc_timestamp(),
+                row["id"],
+            ),
+        )
+        conn.commit()
+        user_id = row["id"]
+    finally:
+        conn.close()
+    revoke_user_sessions(user_id)
+
+
+def set_local_user_admin(username, is_admin=True):
+    ensure_app_state_db()
+    conn = connect_app_state()
+    try:
+        row = conn.execute(
+            "SELECT id FROM users WHERE username = ? COLLATE NOCASE", (username,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"User not found: {username}")
+        conn.execute(
+            "UPDATE users SET is_admin = ?, updated_at = ? WHERE id = ?",
+            (1 if is_admin else 0, utc_timestamp(), row["id"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def user_id_by_username(username):
+    conn = connect_app_state()
+    try:
+        row = conn.execute(
+            "SELECT id FROM users WHERE username = ? COLLATE NOCASE", (username,)
+        ).fetchone()
+        return row["id"] if row else None
+    finally:
+        conn.close()
+
+
+def delete_session_by_token(token):
+    if not token:
+        return
+    conn = connect_app_state()
+    try:
+        conn.execute("DELETE FROM sessions WHERE token_hash = ?", (hash_session_token(token),))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def create_session(user_id):
+    ensure_app_state_db()
+    token = secrets.token_urlsafe(32)
+    now = now_utc()
+    stamp = utc_timestamp(now)
+    expires_at = utc_timestamp(now + timedelta(days=SESSION_TTL_DAYS))
+    conn = connect_app_state()
+    try:
+        conn.execute(
+            """
+            INSERT INTO sessions (user_id, token_hash, created_at, last_seen_at, expires_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user_id, hash_session_token(token), stamp, stamp, expires_at),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return token
+
+
+def build_session_cookie(token):
+    parts = [
+        f"{SESSION_COOKIE_NAME}={token}",
+        "Path=/",
+        "HttpOnly",
+        "SameSite=Lax",
+        f"Max-Age={SESSION_TTL_DAYS * 24 * 60 * 60}",
+    ]
+    if os.environ.get("APP_SESSION_COOKIE_SECURE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        parts.append("Secure")
+    return "; ".join(parts)
+
+
+def clear_session_cookie():
+    parts = [
+        f"{SESSION_COOKIE_NAME}=",
+        "Path=/",
+        "HttpOnly",
+        "SameSite=Lax",
+        "Max-Age=0",
+    ]
+    if os.environ.get("APP_SESSION_COOKIE_SECURE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        parts.append("Secure")
+    return "; ".join(parts)
+
+
+def load_preferences_for_user(user_id):
+    conn = connect_app_state()
+    try:
+        row = conn.execute(
+            "SELECT preferences_json FROM user_preferences WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        if row is None:
+            return default_preferences()
+        try:
+            payload = json.loads(row["preferences_json"])
+        except json.JSONDecodeError:
+            payload = {}
+        return sanitize_preferences(payload)
+    finally:
+        conn.close()
+
+
+def save_preferences_for_user(user_id, preferences):
+    sanitized = sanitize_preferences(preferences)
+    conn = connect_app_state()
+    try:
+        conn.execute(
+            """
+            INSERT INTO user_preferences (user_id, preferences_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                preferences_json = excluded.preferences_json,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, json.dumps(sanitized), utc_timestamp()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return sanitized
+
+
+def authenticate_local_user(username, password):
+    ensure_app_state_db()
+    conn = connect_app_state()
+    try:
+        row = conn.execute(
+            """
+            SELECT id, username, display_name, password_hash, is_active, is_admin, must_change_password
+            FROM users
+            WHERE username = ? COLLATE NOCASE
+            """,
+            (clean_text(username),),
+        ).fetchone()
+        if row is None or not row["is_active"]:
+            return None
+        if not verify_password(password, row["password_hash"]):
+            return None
+        return {
+            "id": row["id"],
+            "username": row["username"],
+            "displayName": row["display_name"],
+            "isAdmin": bool(row["is_admin"]),
+            "mustChangePassword": bool(row["must_change_password"]),
+        }
+    finally:
+        conn.close()
+
+
+def change_password_for_user(user_id, new_password, *, clear_force_flag=True):
+    if not new_password:
+        raise ValueError("New password is required")
+    conn = connect_app_state()
+    try:
+        updates = ["password_hash = ?", "updated_at = ?"]
+        values = [hash_password(new_password), utc_timestamp()]
+        if clear_force_flag:
+            updates.append("must_change_password = 0")
+        values.append(user_id)
+        conn.execute(
+            f"UPDATE users SET {', '.join(updates)} WHERE id = ?",
+            values,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def verify_current_password(user_id, password):
+    conn = connect_app_state()
+    try:
+        row = conn.execute(
+            "SELECT password_hash FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        return verify_password(password, row["password_hash"])
+    finally:
+        conn.close()
+
+
+def change_own_password(user, current_password, new_password):
+    if user.get("mustChangePassword"):
+        change_password_for_user(user["id"], new_password, clear_force_flag=True)
+        return
+    if not verify_current_password(user["id"], current_password):
+        raise ValueError("Current password is incorrect")
+    change_password_for_user(user["id"], new_password, clear_force_flag=True)
+
+
+def admin_reset_password(actor, target_username, new_password):
+    if not actor.get("isAdmin"):
+        raise PermissionError("Administrator access required")
+    target_username = clean_text(target_username)
+    if not target_username:
+        raise ValueError("Target username is required")
+    if target_username.lower() == str(actor.get("username", "")).lower():
+        raise ValueError("Use the personal change-password form for your own account")
+    conn = connect_app_state()
+    try:
+        row = conn.execute(
+            """
+            SELECT id, username, display_name, is_admin
+            FROM users
+            WHERE username = ? COLLATE NOCASE
+            """,
+            (target_username,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("User not found")
+        conn.execute(
+            """
+            UPDATE users
+            SET password_hash = ?, must_change_password = 1, updated_at = ?
+            WHERE id = ?
+            """,
+            (hash_password(new_password), utc_timestamp(), row["id"]),
+        )
+        conn.commit()
+        target = {
+            "id": row["id"],
+            "username": row["username"],
+            "displayName": row["display_name"],
+            "isAdmin": bool(row["is_admin"]),
+        }
+    finally:
+        conn.close()
+    revoke_user_sessions(target["id"])
+    return target
+
+
+def current_user_from_session(token):
+    if not token:
+        return None
+    ensure_app_state_db()
+    token_hash = hash_session_token(token)
+    conn = connect_app_state()
+    try:
+        conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (utc_timestamp(),))
+        row = conn.execute(
+            """
+            SELECT u.id, u.username, u.display_name, u.is_active, u.is_admin, u.must_change_password, s.id AS session_id
+            FROM sessions s
+            JOIN users u ON u.id = s.user_id
+            WHERE s.token_hash = ? AND s.expires_at > ?
+            """,
+            (token_hash, utc_timestamp()),
+        ).fetchone()
+        if row is None or not row["is_active"]:
+            conn.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash,))
+            conn.commit()
+            return None
+        conn.execute(
+            "UPDATE sessions SET last_seen_at = ? WHERE id = ?",
+            (utc_timestamp(), row["session_id"]),
+        )
+        conn.commit()
+        preferences = load_preferences_for_user(row["id"])
+        return {
+            "id": row["id"],
+            "username": row["username"],
+            "displayName": row["display_name"],
+            "isAdmin": bool(row["is_admin"]),
+            "mustChangePassword": bool(row["must_change_password"]),
+            "preferences": preferences,
+        }
+    finally:
+        conn.close()
+
+
+def bootstrap_payload(user):
+    return {
+        "user": {
+            "id": user["id"],
+            "username": user["username"],
+            "displayName": user["displayName"],
+            "isAdmin": bool(user.get("isAdmin")),
+            "mustChangePassword": bool(user.get("mustChangePassword")),
+        },
+        "preferences": sanitize_preferences(user.get("preferences")),
+    }
+
+
+def render_login_page(error_message=""):
+    template = (APP_DIR / "login.html").read_text(encoding="utf-8")
+    error_html = ""
+    if error_message:
+        error_html = (
+            '<div class="auth-error" role="alert">'
+            f"{html.escape(error_message)}"
+            "</div>"
+        )
+    return template.replace("__LOGIN_ERROR__", error_html)
+
+
+def render_change_password_page(user, error_message=""):
+    template = (APP_DIR / "change_password.html").read_text(encoding="utf-8")
+    error_html = ""
+    if error_message:
+        error_html = (
+            '<div class="auth-error" role="alert">'
+            f"{html.escape(error_message)}"
+            "</div>"
+        )
+    return (
+        template.replace("__DISPLAY_NAME__", html.escape(user["displayName"]))
+        .replace("__CHANGE_PASSWORD_ERROR__", error_html)
+    )
+
+
+def render_index_page(user):
+    template = (APP_DIR / "index.html").read_text(encoding="utf-8")
+    bootstrap_json = json.dumps(bootstrap_payload(user), ensure_ascii=False).replace(
+        "</", "<\\/"
+    )
+    return template.replace(
+        "__BOOTSTRAP_JSON__",
+        bootstrap_json,
+    )
 
 
 def q(identifier):
@@ -1518,11 +2205,13 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         print(f"{self.address_string()} - {format % args}")
 
-    def send_json(self, payload, status=200):
+    def send_json(self, payload, status=200, extra_headers=None):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        for key, value in extra_headers or []:
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -1538,6 +2227,23 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
 
+    def send_html(self, content, status=200, extra_headers=None):
+        body = content.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        for key, value in extra_headers or []:
+            self.send_header(key, value)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_redirect(self, location, extra_headers=None):
+        self.send_response(302)
+        self.send_header("Location", location)
+        for key, value in extra_headers or []:
+            self.send_header(key, value)
+        self.end_headers()
+
     def send_bytes(self, content, content_type, filename):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
@@ -1547,6 +2253,51 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         self.wfile.write(content)
+
+    def cookie_value(self, name):
+        jar = cookies.SimpleCookie()
+        jar.load(self.headers.get("Cookie", ""))
+        morsel = jar.get(name)
+        return morsel.value if morsel else ""
+
+    def current_user(self):
+        if hasattr(self, "_cached_user"):
+            return self._cached_user
+        token = self.cookie_value(SESSION_COOKIE_NAME)
+        self._cached_user = current_user_from_session(token)
+        return self._cached_user
+
+    def require_auth(self, *, api=False, export=False, allow_password_change_only=False):
+        user = self.current_user()
+        if user is not None:
+            if user.get("mustChangePassword") and not allow_password_change_only:
+                if api:
+                    self.send_json({"error": "Password change required"}, 423)
+                else:
+                    self.send_redirect("/change-password")
+                return None
+            return user
+        if api:
+            self.send_json({"error": "Authentication required"}, 401)
+        elif export:
+            self.send_redirect("/login")
+        else:
+            self.send_redirect("/login")
+        return None
+
+    def read_body(self):
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        return self.rfile.read(length) if length else b""
+
+    def read_json_body(self):
+        raw = self.read_body()
+        if not raw:
+            return {}
+        return json.loads(raw.decode("utf-8"))
+
+    def read_form_body(self):
+        raw = self.read_body().decode("utf-8")
+        return parse_qs(raw, keep_blank_values=True)
 
     def stream_attachment(self, attachment_record_id, disposition="attachment"):
         row = fetch_attachment_record(attachment_record_id)
@@ -1602,21 +2353,65 @@ class Handler(BaseHTTPRequestHandler):
             archive.close()
 
     def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        params = parse_qs(parsed.query)
+
+        if path == "/login":
+            user = self.current_user()
+            if user is not None:
+                self.send_redirect(
+                    "/change-password" if user.get("mustChangePassword") else "/"
+                )
+                return
+            self.send_html(render_login_page(params.get("error", [""])[0]))
+            return
+
+        if path == "/change-password":
+            user = self.require_auth(allow_password_change_only=True)
+            if user is None:
+                return
+            if not user.get("mustChangePassword"):
+                self.send_redirect("/")
+                return
+            self.send_html(render_change_password_page(user, params.get("error", [""])[0]))
+            return
+
+        if path == "/":
+            user = self.require_auth()
+            if user is None:
+                return
+            self.send_html(render_index_page(user))
+            return
+
+        if path.startswith("/api/") or path.startswith("/export/"):
+            if self.require_auth(api=path.startswith("/api/"), export=path.startswith("/export/")) is None:
+                return
+
         if not DB_PATH.exists() and (
-            self.path.startswith("/api/") or self.path.startswith("/export/")
+            path.startswith("/api/") or path.startswith("/export/")
         ):
             self.send_json(
                 {"error": "Database not found. Run scripts/import_zoho.py first."}, 503
             )
             return
 
-        parsed = urlparse(self.path)
-        path = parsed.path
-        params = parse_qs(parsed.query)
-
         try:
             if path == "/api/metadata":
                 self.send_json(metadata())
+                return
+            if path == "/api/me":
+                user = self.current_user()
+                self.send_json(bootstrap_payload(user) if user else {"error": "Authentication required"}, 200 if user else 401)
+                return
+            if path == "/api/admin/users":
+                user = self.require_auth(api=True)
+                if user is None:
+                    return
+                if not user.get("isAdmin"):
+                    self.send_json({"error": "Administrator access required"}, 403)
+                    return
+                self.send_json({"users": list_local_users()})
                 return
             if path == "/api/accounts":
                 self.send_json(search_accounts(params))
@@ -1666,23 +2461,143 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": str(exc)}, 500)
             return
 
-        if path == "/":
-            self.send_file(APP_DIR / "index.html")
-            return
         requested = (APP_DIR / path.lstrip("/")).resolve()
         if APP_DIR in requested.parents:
             self.send_file(requested)
         else:
             self.send_error(403)
 
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path == "/login":
+            try:
+                form = self.read_form_body()
+                username = clean_text(form.get("username", [""])[0])
+                password = form.get("password", [""])[0]
+                user = authenticate_local_user(username, password)
+            except (json.JSONDecodeError, UnicodeDecodeError, sqlite3.Error):
+                user = None
+            if user is None:
+                message = "Invalid username or password"
+                if user_count() == 0:
+                    message = "No local users exist yet. Run scripts/manage_users.py seed first."
+                self.send_redirect(f"/login?error={quote(message)}")
+                return
+
+            token = create_session(user["id"])
+            self.send_redirect(
+                "/change-password" if user.get("mustChangePassword") else "/",
+                extra_headers=[("Set-Cookie", build_session_cookie(token))],
+            )
+            return
+
+        if path == "/change-password":
+            user = self.require_auth(allow_password_change_only=True)
+            if user is None:
+                return
+            try:
+                form = self.read_form_body()
+                new_password = form.get("new_password", [""])[0]
+                confirm_password = form.get("confirm_password", [""])[0]
+                if not new_password:
+                    raise ValueError("New password is required")
+                if new_password != confirm_password:
+                    raise ValueError("New passwords did not match")
+                change_own_password(user, "", new_password)
+            except ValueError as exc:
+                self.send_redirect(f"/change-password?error={quote(str(exc))}")
+                return
+            self.send_redirect("/")
+            return
+
+        if path == "/api/logout":
+            token = self.cookie_value(SESSION_COOKIE_NAME)
+            if token:
+                delete_session_by_token(token)
+            self.send_json(
+                {"ok": True},
+                extra_headers=[("Set-Cookie", clear_session_cookie())],
+            )
+            return
+
+        if path == "/api/preferences":
+            user = self.require_auth(api=True)
+            if user is None:
+                return
+            try:
+                payload = self.read_json_body()
+                preferences = save_preferences_for_user(user["id"], payload)
+                self.send_json({"preferences": preferences})
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self.send_json({"error": "Invalid JSON body"}, 400)
+            except sqlite3.Error as exc:
+                self.send_json({"error": str(exc)}, 500)
+            return
+
+        if path == "/api/change-password":
+            user = self.require_auth(api=True, allow_password_change_only=True)
+            if user is None:
+                return
+            try:
+                payload = self.read_json_body()
+                current_password = payload.get("currentPassword", "")
+                new_password = payload.get("newPassword", "")
+                confirm_password = payload.get("confirmPassword", "")
+                if not new_password:
+                    raise ValueError("New password is required")
+                if new_password != confirm_password:
+                    raise ValueError("New passwords did not match")
+                change_own_password(user, current_password, new_password)
+                self.send_json({"ok": True})
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, 400)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self.send_json({"error": "Invalid JSON body"}, 400)
+            return
+
+        if path == "/api/admin/reset-password":
+            user = self.require_auth(api=True)
+            if user is None:
+                return
+            if not user.get("isAdmin"):
+                self.send_json({"error": "Administrator access required"}, 403)
+                return
+            try:
+                payload = self.read_json_body()
+                target = admin_reset_password(
+                    user,
+                    payload.get("username", ""),
+                    payload.get("newPassword", ""),
+                )
+                self.send_json(
+                    {
+                        "ok": True,
+                        "message": f"{target['displayName']} must change their password after the next login.",
+                        "user": target,
+                    }
+                )
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, 400)
+            except PermissionError as exc:
+                self.send_json({"error": str(exc)}, 403)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self.send_json({"error": "Invalid JSON body"}, 400)
+            return
+
+        self.send_error(404)
+
 
 def main():
+    ensure_app_state_db()
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PORT", "8765"))
     server = ThreadingHTTPServer((host, port), Handler)
     print(f"CDX CRM UI running on {host}:{port}")
     print(f"Database path: {DB_PATH}")
     print(f"Attachment archive path: {BACKUP_DIR}")
+    print(f"App state path: {APP_STATE_DB_PATH}")
     print("Press Ctrl+C to stop.")
     server.serve_forever()
 

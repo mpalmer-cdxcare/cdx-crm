@@ -6,9 +6,12 @@
         <title>CDX CRM</title>
         <script>
             (() => {
-                const saved = localStorage.getItem("zoho-theme");
+                window.__BOOTSTRAP__ = __BOOTSTRAP_JSON__;
+                const preference = window.__BOOTSTRAP__?.preferences?.theme;
                 const systemDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-                const theme = saved || (systemDark ? "dark" : "light");
+                const theme = preference === "dark" || preference === "light"
+                    ? preference
+                    : (systemDark ? "dark" : "light");
                 document.documentElement.dataset.theme = theme;
             })();
         </script>
@@ -71,6 +74,26 @@
                         <p class="filter-help">Save a search and filter combination to reuse it later.</p>
                     </div>
                 </section>
+
+                <section class="account-tools">
+                    <details id="adminPanel" class="account-tool-card" hidden>
+                        <summary>User admin</summary>
+                        <p class="filter-help">Reset another user’s password. They will be required to choose a new one at next login.</p>
+                        <div id="adminMessage" class="inline-message" hidden></div>
+                        <form id="adminResetForm" class="stack-form">
+                            <label>
+                                <span>User</span>
+                                <select id="adminResetUser" required></select>
+                            </label>
+                            <label>
+                                <span>Temporary password</span>
+                                <input id="adminResetPassword" type="password" autocomplete="new-password" required />
+                            </label>
+                            <button type="submit">Reset password</button>
+                        </form>
+                        <div id="adminUserList" class="admin-user-list"></div>
+                    </details>
+                </section>
             </aside>
 
             <section class="workspace">
@@ -89,10 +112,18 @@
                     <a id="exportContacts" class="button-link" href="/export/contacts.xlsx">
                         Export Contacts
                     </a>
+                    <div class="toolbar-spacer"></div>
                     <button id="themeToggle" type="button" aria-pressed="true">
                         Dark mode
                     </button>
                     <button id="clearFilters" type="button">Clear</button>
+                    <div class="session-controls">
+                        <div class="session-user">
+                            <span>Signed in</span>
+                            <strong id="sessionUserName"></strong>
+                        </div>
+                        <button id="logoutButton" type="button">Log out</button>
+                    </div>
                 </header>
 
                 <section class="content">
